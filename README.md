@@ -42,7 +42,8 @@ requests to Jira's REST API.
 
 4. **Set up environment variables:**
 
-   Create a `.env` file in the root directory of the project and add your Jira credentials and server URL:
+   Create a `.env` file in the root directory of the project and add your server URL, Jira credentials, and path to your
+   CSV file:
 
    ```env
    JIRA_SERVER=https://your-domain.atlassian.net
