@@ -48,7 +48,7 @@ requests to Jira's REST API.
    JIRA_SERVER=https://your-domain.atlassian.net
    JIRA_USER=your-email@example.com
    JIRA_API_TOKEN=your-api-token
-   CSV_FILE_PATH=C:\\path\\to\\your\\JiraWorkLogs.csv
+   CSV_FILE_PATH=C:\path\to\your\JiraWorkLogs.csv
    ```
 
 5. **Prepare the CSV file:**
