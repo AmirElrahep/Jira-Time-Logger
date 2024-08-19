@@ -31,11 +31,21 @@ requests to Jira's REST API.
 2. **Create and activate a virtual environment (optional but recommended):**
 
     ```bash
-    python -m venv venv
-    source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+    python -m venv .venv
     ```
 
+    - **On Windows:**
+      ```bash
+      .\.venv\Scripts\activate
+      ```
+
+    - **On macOS/Linux:**
+      ```bash
+      source .venv/bin/activate
+      ```
+
 3. **Install dependencies:**
+
    ```bash
     pip install -r requirements.txt
     ```
