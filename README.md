@@ -83,3 +83,4 @@ Execute the script to read the CSV file, log work hours to Jira, and update the 
 
 ```bash
 python main.py
+```
