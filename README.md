@@ -84,3 +84,11 @@ Execute the script to read the CSV file, log work hours to Jira, and update the 
 ```bash
 python main.py
 ```
+
+## Deactivate the Virtual Environment (Optional):
+
+When you are done, you can deactivate the virtual environment by running:
+
+```bash
+deactivate
+```
