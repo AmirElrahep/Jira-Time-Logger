@@ -24,9 +24,9 @@ requests to Jira's REST API.
 
 1. **Clone the repository:**
 
-    ```bash
-    git clone https://github.com/AmirElrahep/Jira-Time-Logger.git
-    ```
+   ```bash
+   git clone https://github.com/AmirElrahep/Jira-Time-Logger.git
+   ```
 
 2. **Create and activate a virtual environment (optional but recommended):**
 
@@ -47,8 +47,8 @@ requests to Jira's REST API.
 3. **Install dependencies:**
 
    ```bash
-    pip install -r requirements.txt
-    ```
+   pip install -r requirements.txt
+   ```
 
 4. **Set up environment variables:**
 
