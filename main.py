@@ -3,7 +3,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import pytz
@@ -25,17 +25,27 @@ LOCAL_TIMEZONE = os.getenv('LOCAL_TIMEZONE', 'America/New_York')
 # (e.g. "Miscellaneous") is kept for personal time tracking and never logged.
 JIRA_KEY_PATTERN = re.compile(r'^[A-Z][A-Z0-9]+-\d+$')
 
+# Seconds to wait for Jira API responses before giving up.
+REQUEST_TIMEOUT = 30
+
 
 def parse_time_range(time_range):
-    """Parse 'h:mm am - h:mm pm' into (start, end, duration_seconds)."""
+    """Parse 'h:mm am - h:mm pm' into (start, end, duration_seconds).
+
+    Ranges that end before the start time are treated as crossing midnight
+    (e.g. '11:00 pm - 1:00 am' is 2 hours); equal start and end times are
+    rejected as zero-length.
+    """
     parts = time_range.split(' - ')
     if len(parts) != 2:
         raise ValueError(f"invalid time range '{time_range.strip()}'")
     start_time = datetime.strptime(parts[0].strip(), '%I:%M %p')
     end_time = datetime.strptime(parts[1].strip(), '%I:%M %p')
+    if end_time == start_time:
+        raise ValueError(f"zero-length time range '{time_range.strip()}'")
+    if end_time < start_time:
+        end_time += timedelta(days=1)  # overnight range
     duration = (end_time - start_time).total_seconds()
-    if duration <= 0:
-        raise ValueError(f"end time is not after start time in '{time_range.strip()}'")
     return start_time, end_time, duration
 
 
@@ -96,7 +106,12 @@ def add_worklog(issue_key, comment, started, time_spent_seconds):
         "started": started,
         "timeSpentSeconds": time_spent_seconds
     }
-    response = requests.post(url, data=json.dumps(payload), headers=HEADERS, auth=jira_auth())
+    try:
+        response = requests.post(url, data=json.dumps(payload), headers=HEADERS, auth=jira_auth(),
+                                 timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.RequestException as e:
+        print(f"  Failed to create work log on {issue_key}: {e}")
+        return None
     if response.status_code == 201:
         worklog_id = response.json().get('id')
         print(f"  Logged {time_spent_seconds}s on {issue_key} starting {started} (worklog {worklog_id})")
@@ -108,7 +123,11 @@ def add_worklog(issue_key, comment, started, time_spent_seconds):
 def delete_worklog(issue_key, worklog_id):
     """Delete a work log entry (used to roll back a partially logged row)."""
     url = f"{JIRA_SERVER}/rest/api/3/issue/{issue_key}/worklog/{worklog_id}"
-    response = requests.delete(url, headers=HEADERS, auth=jira_auth())
+    try:
+        response = requests.delete(url, headers=HEADERS, auth=jira_auth(), timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.RequestException as e:
+        print(f"  WARNING: failed to roll back worklog {worklog_id} on {issue_key}: {e}")
+        return False
     if response.status_code == 204:
         print(f"  Rolled back worklog {worklog_id} on {issue_key}")
         return True
