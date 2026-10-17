@@ -39,9 +39,13 @@ def main():
     if missing:
         sys.exit(f"Missing required environment variables: {', '.join(missing)}")
 
+    csv_path = CSV_FILE_PATH
+    if csv_path is None:  # unreachable; narrows the type for static checkers
+        sys.exit("Missing required environment variables: CSV_FILE_PATH")
+
     # Read everything as strings so the file is written back exactly as-is
     # (blank separator rows stay blank, TRUE stays TRUE).
-    df = pd.read_csv(CSV_FILE_PATH, dtype=str)
+    df = pd.read_csv(csv_path, dtype=str)
 
     required_columns = ['Date', 'Times', 'Ticket', 'Logged', 'Description']
     missing_columns = [c for c in required_columns if c not in df.columns]
@@ -56,26 +60,27 @@ def main():
     active_days = set()  # dates with loggable (Jira) rows this run; limits the totals report
     current_date = None
 
-    def add_day_total(date_str, seconds, jira):
-        totals = day_totals.setdefault(date_str, [0, 0])
+    def add_day_total(day, seconds, jira):
+        totals = day_totals.setdefault(day, [0, 0])
         if jira:
             totals[0] += seconds
         totals[1] += seconds
 
-    def ensure_date_header(date_str):
+    def ensure_date_header(day):
         nonlocal current_date
-        if date_str != current_date:
-            current_date = date_str
-            print(f"\n{date_str}")
+        if day != current_date:
+            current_date = day
+            print(f"\n{day}")
 
-    def print_row(date_str, status, ticket, detail):
-        ensure_date_header(date_str)
-        print(f"  [{status:<5}] {ticket:<14} {detail}")
+    def print_row(day, status, ticket, text):
+        ensure_date_header(day)
+        print(f"  [{status:<5}] {ticket:<14} {text}")
 
     if args.dry_run:
         print("Dry run - nothing will be sent to Jira.")
 
-    for index, row in df.iterrows():
+    for position, (index, row) in enumerate(df.iterrows()):
+        csv_row_number = position + 2  # 1-based, accounting for the header row
         # Skip blank separator rows and rows already logged.
         if is_blank(row['Date']) and is_blank(row['Times']) and is_blank(row['Ticket']):
             continue
@@ -91,14 +96,14 @@ def main():
             skipped_count += 1
             try:
                 add_day_total(date_str, row_total_seconds(row), jira=False)
-            except Exception:
+            except ValueError:
                 pass  # unparseable personal entries are ignored
             continue
 
         active_days.add(date_str)
 
         if is_blank(row['Date']) or is_blank(row['Times']):
-            print_row(date_str, 'ERROR', issue_key, f"row {index + 2}: missing Date or Times")
+            print_row(date_str, 'ERROR', issue_key, f"row {csv_row_number}: missing Date or Times")
             error_count += 1
             continue
 
@@ -106,7 +111,8 @@ def main():
         try:
             entries = validate_row(row, LOCAL_TIMEZONE)
         except Exception as e:
-            print_row(date_str, 'ERROR', issue_key, f"row {index + 2}: {e} - nothing logged for this row")
+            print_row(date_str, 'ERROR', issue_key,
+                      f"row {csv_row_number}: {e} - nothing logged for this row")
             error_count += 1
             continue
 
@@ -122,6 +128,7 @@ def main():
             continue
 
         ensure_date_header(date_str)  # so any API error detail prints under the right day
+        assert client is not None  # dry-run rows never reach this point
         if client.log_row(issue_key, description, entries):
             df.at[index, 'Logged'] = 'TRUE'
             add_day_total(date_str, total, jira=True)
@@ -130,12 +137,12 @@ def main():
         else:
             add_day_total(date_str, total, jira=False)  # time exists in the CSV but was not logged
             print_row(date_str, 'FAIL', issue_key,
-                      f"row {index + 2}: Jira call failed - row left unlogged, fix and rerun")
+                      f"row {csv_row_number}: Jira call failed - row left unlogged, fix and rerun")
             error_count += 1
 
     if not args.dry_run:
         try:
-            df.to_csv(CSV_FILE_PATH, index=False)
+            df.to_csv(csv_path, index=False)
         except Exception as e:
             sys.exit(f"Failed to save CSV file: {e}")
 
