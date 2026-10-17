@@ -1,6 +1,9 @@
 import json
 import os
+import re
+import sys
 from datetime import datetime
+
 import pandas as pd
 import pytz
 import requests
@@ -15,47 +18,64 @@ JIRA_SERVER = os.getenv('JIRA_SERVER')
 JIRA_USER = os.getenv('JIRA_USER')
 JIRA_API_TOKEN = os.getenv('JIRA_API_TOKEN')
 CSV_FILE_PATH = os.getenv('CSV_FILE_PATH')
+LOCAL_TIMEZONE = os.getenv('LOCAL_TIMEZONE', 'America/New_York')
 
-df = pd.read_csv(CSV_FILE_PATH)
-
-# Ensure 'Logged' column is of boolean type and replace NaN values with False
-df['Logged'] = df['Logged'].astype('boolean')
-df['Logged'] = df['Logged'].fillna(False)
+# Tickets must look like a Jira issue key (e.g. EL-12345). Anything else
+# (e.g. "Miscellaneous") is kept for personal time tracking and never logged.
+JIRA_KEY_PATTERN = re.compile(r'^[A-Z][A-Z0-9]+-\d+$')
 
 
-# Function to parse and calculate duration
 def parse_time_range(time_range):
-    start_time_str, end_time_str = time_range.split(' - ')
-    start_time = datetime.strptime(start_time_str.strip(), '%I:%M %p')
-    end_time = datetime.strptime(end_time_str.strip(), '%I:%M %p')
-    return start_time, end_time, (end_time - start_time).total_seconds()
+    """Parse 'h:mm am - h:mm pm' into (start, end, duration_seconds)."""
+    parts = time_range.split(' - ')
+    if len(parts) != 2:
+        raise ValueError(f"invalid time range '{time_range.strip()}'")
+    start_time = datetime.strptime(parts[0].strip(), '%I:%M %p')
+    end_time = datetime.strptime(parts[1].strip(), '%I:%M %p')
+    duration = (end_time - start_time).total_seconds()
+    if duration <= 0:
+        raise ValueError(f"end time is not after start time in '{time_range.strip()}'")
+    return start_time, end_time, duration
 
 
-# Function to adjust date and time for Jira
 def adjust_datetime(date_str, time_obj):
-    # Define local timezone
-    local_tz = pytz.timezone('America/New_York')  # Update this to your local timezone
-
-    date_dt = datetime.strptime(date_str, '%m/%d/%y')
+    """Combine date and time, localize, and format as Jira UTC timestamp."""
+    local_tz = pytz.timezone(LOCAL_TIMEZONE)
+    date_dt = datetime.strptime(date_str.strip(), '%m/%d/%y')
     date_time = datetime.combine(date_dt, time_obj.time())
-
-    # Localize to local timezone
     local_time = local_tz.localize(date_time, is_dst=None)
-
-    # Convert to UTC
     utc_time = local_time.astimezone(pytz.utc)
-
     return utc_time.strftime('%Y-%m-%dT%H:%M:%S.000+0000')
 
 
-# Function to create a work log entry
+def validate_row(row):
+    """Parse every time range in a row up front.
+
+    Returns a list of (started_iso, duration_seconds) entries, or raises
+    ValueError if anything in the row is invalid. Nothing is sent to Jira
+    until the entire row validates.
+    """
+    entries = []
+    for time_range in str(row['Times']).split('---'):
+        start_time, _, duration = parse_time_range(time_range.strip())
+        started = adjust_datetime(str(row['Date']), start_time)
+        entries.append((started, int(duration)))
+    return entries
+
+
+def jira_auth():
+    return HTTPBasicAuth(JIRA_USER, JIRA_API_TOKEN)
+
+
+HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json"
+}
+
+
 def add_worklog(issue_key, comment, started, time_spent_seconds):
+    """Create a work log entry. Returns the new worklog id, or None on failure."""
     url = f"{JIRA_SERVER}/rest/api/3/issue/{issue_key}/worklog"
-    auth = HTTPBasicAuth(JIRA_USER, JIRA_API_TOKEN)
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json"
-    }
     payload = {
         "comment": {
             "content": [
@@ -75,35 +95,102 @@ def add_worklog(issue_key, comment, started, time_spent_seconds):
         "started": started,
         "timeSpentSeconds": time_spent_seconds
     }
-    response = requests.post(url, data=json.dumps(payload), headers=headers, auth=auth)
+    response = requests.post(url, data=json.dumps(payload), headers=HEADERS, auth=jira_auth())
     if response.status_code == 201:
-        print(f"Work log added successfully: {response.json()}")
+        worklog_id = response.json().get('id')
+        print(f"  Logged {time_spent_seconds}s on {issue_key} starting {started} (worklog {worklog_id})")
+        return worklog_id
+    print(f"  Failed to create work log on {issue_key}: {response.status_code} {response.text}")
+    return None
+
+
+def delete_worklog(issue_key, worklog_id):
+    """Delete a work log entry (used to roll back a partially logged row)."""
+    url = f"{JIRA_SERVER}/rest/api/3/issue/{issue_key}/worklog/{worklog_id}"
+    response = requests.delete(url, headers=HEADERS, auth=jira_auth())
+    if response.status_code == 204:
+        print(f"  Rolled back worklog {worklog_id} on {issue_key}")
         return True
-    else:
-        print(f"Failed to create work log entry: {response.text}")
-        return False
+    print(f"  WARNING: failed to roll back worklog {worklog_id} on {issue_key}: "
+          f"{response.status_code} {response.text}")
+    return False
 
 
-# Iterate through the rows and add work logs
-for index, row in df.iterrows():
-    if not row['Logged']:
-        date_str = row['Date']
-        issue_key = row['Ticket']
-        time_ranges = row['Times'].split('---')
-        description = row['Description']
+def log_row(issue_key, description, entries):
+    """Log all time ranges for a row, rolling back on partial failure.
 
-        for time_range in time_ranges:
-            try:
-                start_time, end_time, duration = parse_time_range(time_range.strip())
-                start_time_iso = adjust_datetime(date_str, start_time)
-                if add_worklog(issue_key, description, start_time_iso, int(duration)):
-                    df.at[index, 'Logged'] = True
-            except Exception as e:
-                print(f"Failed to log work for issue {issue_key}: {e}")
+    Returns True only if every entry was logged successfully.
+    """
+    created = []
+    for started, duration in entries:
+        worklog_id = add_worklog(issue_key, description, started, duration)
+        if worklog_id is None:
+            # Roll back anything already logged so the row stays unlogged.
+            for wl_id in created:
+                delete_worklog(issue_key, wl_id)
+            return False
+        created.append(worklog_id)
+    return True
 
-# Save the updated CSV file
-try:
-    df.to_csv(CSV_FILE_PATH, index=False)
-    print("Work logs processing completed and CSV file saved.")
-except Exception as e:
-    print(f"Failed to save CSV file: {e}")
+
+def is_blank(value):
+    return pd.isna(value) or str(value).strip() == ''
+
+
+def main():
+    # Read everything as strings so the file is written back exactly as-is
+    # (blank separator rows stay blank, TRUE stays TRUE).
+    df = pd.read_csv(CSV_FILE_PATH, dtype=str)
+
+    logged_count = skipped_count = error_count = 0
+
+    for index, row in df.iterrows():
+        # Skip blank separator rows and rows already logged.
+        if is_blank(row['Date']) and is_blank(row['Times']) and is_blank(row['Ticket']):
+            continue
+        if not is_blank(row['Logged']) and str(row['Logged']).strip().upper() == 'TRUE':
+            continue
+
+        issue_key = str(row['Ticket']).strip()
+        row_label = f"row {index + 2} ({row['Date']}, {issue_key})"
+
+        # Skip non-Jira tickets (e.g. "Miscellaneous") kept for personal tracking.
+        if not JIRA_KEY_PATTERN.match(issue_key):
+            print(f"Skipping {row_label}: '{issue_key}' is not a Jira ticket key.")
+            skipped_count += 1
+            continue
+
+        if is_blank(row['Date']) or is_blank(row['Times']):
+            print(f"Skipping {row_label}: missing Date or Times.")
+            error_count += 1
+            continue
+
+        # Validate the whole row before logging anything.
+        try:
+            entries = validate_row(row)
+        except Exception as e:
+            print(f"Skipping {row_label}: {e}. Nothing was logged for this row.")
+            error_count += 1
+            continue
+
+        description = '' if is_blank(row['Description']) else str(row['Description'])
+
+        print(f"Logging {row_label}...")
+        if log_row(issue_key, description, entries):
+            df.at[index, 'Logged'] = 'TRUE'
+            logged_count += 1
+        else:
+            print(f"  Row not marked as logged; fix the issue and rerun.")
+            error_count += 1
+
+    try:
+        df.to_csv(CSV_FILE_PATH, index=False)
+    except Exception as e:
+        sys.exit(f"Failed to save CSV file: {e}")
+
+    print(f"\nDone. {logged_count} row(s) logged, {skipped_count} skipped (non-Jira), "
+          f"{error_count} error(s).")
+
+
+if __name__ == '__main__':
+    main()
