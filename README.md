@@ -23,6 +23,13 @@ requests to Jira's REST API.
 - Preserves your CSV formatting when saving (blank rows stay blank, `TRUE` stays `TRUE`).
 - Prints a summary of logged, skipped, and errored rows.
 
+## Project Structure
+
+- `main.py` - CLI entry point: configuration, CSV processing loop, and console output.
+- `jira_time_logger/parsing.py` - time range parsing, validation, and formatting helpers.
+- `jira_time_logger/jira_client.py` - Jira work log REST API client with rollback support.
+- `tests/` - unit tests for the parsing and validation logic.
+
 ## Requirements
 
 - Python 3.6+
@@ -109,6 +116,15 @@ To validate your CSV and preview what would be logged without sending anything t
 
 ```bash
 python main.py --dry-run
+```
+
+## Running the Tests
+
+Install the development dependencies and run pytest:
+
+```bash
+pip install -r requirements-dev.txt
+pytest
 ```
 
 ## Deactivate the Virtual Environment (Optional):
