@@ -110,13 +110,11 @@ def add_worklog(issue_key, comment, started, time_spent_seconds):
         response = requests.post(url, data=json.dumps(payload), headers=HEADERS, auth=jira_auth(),
                                  timeout=REQUEST_TIMEOUT)
     except requests.exceptions.RequestException as e:
-        print(f"  Failed to create work log on {issue_key}: {e}")
+        print(f"          -> request failed: {e}")
         return None
     if response.status_code == 201:
-        worklog_id = response.json().get('id')
-        print(f"  Logged {time_spent_seconds}s on {issue_key} starting {started} (worklog {worklog_id})")
-        return worklog_id
-    print(f"  Failed to create work log on {issue_key}: {response.status_code} {response.text}")
+        return response.json().get('id')
+    print(f"          -> Jira rejected worklog: {response.status_code} {response.text}")
     return None
 
 
@@ -126,12 +124,12 @@ def delete_worklog(issue_key, worklog_id):
     try:
         response = requests.delete(url, headers=HEADERS, auth=jira_auth(), timeout=REQUEST_TIMEOUT)
     except requests.exceptions.RequestException as e:
-        print(f"  WARNING: failed to roll back worklog {worklog_id} on {issue_key}: {e}")
+        print(f"          -> WARNING: failed to roll back worklog {worklog_id} on {issue_key}: {e}")
         return False
     if response.status_code == 204:
-        print(f"  Rolled back worklog {worklog_id} on {issue_key}")
+        print(f"          -> rolled back worklog {worklog_id} on {issue_key}")
         return True
-    print(f"  WARNING: failed to roll back worklog {worklog_id} on {issue_key}: "
+    print(f"          -> WARNING: failed to roll back worklog {worklog_id} on {issue_key}: "
           f"{response.status_code} {response.text}")
     return False
 
@@ -155,6 +153,19 @@ def log_row(issue_key, description, entries):
 
 def is_blank(value):
     return pd.isna(value) or str(value).strip() == ''
+
+
+def format_duration(seconds):
+    return f"{int(seconds) // 3600}h {int(seconds) % 3600 // 60}m"
+
+
+def row_total_seconds(row):
+    """Total seconds across all time ranges in a row (raises on bad data)."""
+    return sum(parse_time_range(tr.strip())[2] for tr in str(row['Times']).split('---'))
+
+
+def truncate(text, width=60):
+    return text if len(text) <= width else text[:width - 3] + '...'
 
 
 def main():
@@ -182,6 +193,28 @@ def main():
         sys.exit(f"CSV file is missing required column(s): {', '.join(missing_columns)}")
 
     logged_count = skipped_count = error_count = 0
+    day_totals = {}  # date string -> [jira_seconds, all_seconds] for rows processed this run
+    active_days = set()  # dates with loggable (Jira) rows this run; limits the totals report
+    current_date = None
+
+    def add_day_total(date_str, seconds, jira):
+        totals = day_totals.setdefault(date_str, [0, 0])
+        if jira:
+            totals[0] += seconds
+        totals[1] += seconds
+
+    def ensure_date_header(date_str):
+        nonlocal current_date
+        if date_str != current_date:
+            current_date = date_str
+            print(f"\n{date_str}")
+
+    def print_row(date_str, status, ticket, detail):
+        ensure_date_header(date_str)
+        print(f"  [{status:<5}] {ticket:<14} {detail}")
+
+    if args.dry_run:
+        print("Dry run - nothing will be sent to Jira.")
 
     for index, row in df.iterrows():
         # Skip blank separator rows and rows already logged.
@@ -191,16 +224,22 @@ def main():
             continue
 
         issue_key = str(row['Ticket']).strip()
-        row_label = f"row {index + 2} ({row['Date']}, {issue_key})"
+        date_str = '(no date)' if is_blank(row['Date']) else str(row['Date']).strip()
 
-        # Skip non-Jira tickets (e.g. "Miscellaneous") kept for personal tracking.
+        # Non-Jira tickets (e.g. "Miscellaneous") are personal tracking entries:
+        # count them toward day totals but keep them out of the per-row output.
         if not JIRA_KEY_PATTERN.match(issue_key):
-            print(f"Skipping {row_label}: '{issue_key}' is not a Jira ticket key.")
             skipped_count += 1
+            try:
+                add_day_total(date_str, row_total_seconds(row), jira=False)
+            except Exception:
+                pass  # unparseable personal entries are ignored
             continue
 
+        active_days.add(date_str)
+
         if is_blank(row['Date']) or is_blank(row['Times']):
-            print(f"Skipping {row_label}: missing Date or Times.")
+            print_row(date_str, 'ERROR', issue_key, f"row {index + 2}: missing Date or Times")
             error_count += 1
             continue
 
@@ -208,25 +247,31 @@ def main():
         try:
             entries = validate_row(row)
         except Exception as e:
-            print(f"Skipping {row_label}: {e}. Nothing was logged for this row.")
+            print_row(date_str, 'ERROR', issue_key, f"row {index + 2}: {e} - nothing logged for this row")
             error_count += 1
             continue
 
         description = '' if is_blank(row['Description']) else str(row['Description'])
+        total = sum(duration for _, duration in entries)
+        ranges = f"{len(entries)} range{'' if len(entries) == 1 else 's'}"
+        detail = f"{format_duration(total):>7}  {ranges:<9} {truncate(description)}"
 
         if args.dry_run:
-            total = sum(duration for _, duration in entries)
-            print(f"[dry-run] Would log {len(entries)} entr{'y' if len(entries) == 1 else 'ies'} "
-                  f"({int(total) // 3600}h {int(total) % 3600 // 60}m) on {row_label}")
+            add_day_total(date_str, total, jira=True)
+            print_row(date_str, 'DRY', issue_key, detail)
             logged_count += 1
             continue
 
-        print(f"Logging {row_label}...")
+        ensure_date_header(date_str)  # so any API error detail prints under the right day
         if log_row(issue_key, description, entries):
             df.at[index, 'Logged'] = 'TRUE'
+            add_day_total(date_str, total, jira=True)
+            print_row(date_str, 'OK', issue_key, detail)
             logged_count += 1
         else:
-            print(f"  Row not marked as logged; fix the issue and rerun.")
+            add_day_total(date_str, total, jira=False)  # time exists in the CSV but was not logged
+            print_row(date_str, 'FAIL', issue_key,
+                      f"row {index + 2}: Jira call failed - row left unlogged, fix and rerun")
             error_count += 1
 
     if not args.dry_run:
@@ -235,8 +280,22 @@ def main():
         except Exception as e:
             sys.exit(f"Failed to save CSV file: {e}")
 
+    reported_days = {d: s for d, s in day_totals.items() if d in active_days}
+    if reported_days:
+        def date_key(d):
+            try:
+                return datetime.strptime(d, '%m/%d/%y')
+            except ValueError:
+                return datetime.max
+        print(f"\n{'-' * 40}")
+        print("Day totals:")
+        print(f"  {'Date':<10} {'Jira':>8} {'All':>8}")
+        for date_str in sorted(reported_days, key=date_key):
+            jira_s, all_s = reported_days[date_str]
+            print(f"  {date_str:<10} {format_duration(jira_s):>8} {format_duration(all_s):>8}")
+
     action = 'validated' if args.dry_run else 'logged'
-    print(f"\nDone. {logged_count} row(s) {action}, {skipped_count} skipped (non-Jira), "
+    print(f"\nSummary: {logged_count} row(s) {action}, {skipped_count} non-Jira row(s) skipped, "
           f"{error_count} error(s).")
 
 
