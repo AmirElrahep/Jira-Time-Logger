@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import re
@@ -138,9 +139,28 @@ def is_blank(value):
 
 
 def main():
+    parser = argparse.ArgumentParser(description='Log work hours from a CSV file to Jira.')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Validate the CSV and show what would be logged without calling Jira.')
+    args = parser.parse_args()
+
+    if args.dry_run:
+        required = [('CSV_FILE_PATH', CSV_FILE_PATH)]
+    else:
+        required = [('JIRA_SERVER', JIRA_SERVER), ('JIRA_USER', JIRA_USER),
+                    ('JIRA_API_TOKEN', JIRA_API_TOKEN), ('CSV_FILE_PATH', CSV_FILE_PATH)]
+    missing = [name for name, value in required if not value]
+    if missing:
+        sys.exit(f"Missing required environment variables: {', '.join(missing)}")
+
     # Read everything as strings so the file is written back exactly as-is
     # (blank separator rows stay blank, TRUE stays TRUE).
     df = pd.read_csv(CSV_FILE_PATH, dtype=str)
+
+    required_columns = ['Date', 'Times', 'Ticket', 'Logged', 'Description']
+    missing_columns = [c for c in required_columns if c not in df.columns]
+    if missing_columns:
+        sys.exit(f"CSV file is missing required column(s): {', '.join(missing_columns)}")
 
     logged_count = skipped_count = error_count = 0
 
@@ -175,6 +195,13 @@ def main():
 
         description = '' if is_blank(row['Description']) else str(row['Description'])
 
+        if args.dry_run:
+            total = sum(duration for _, duration in entries)
+            print(f"[dry-run] Would log {len(entries)} entr{'y' if len(entries) == 1 else 'ies'} "
+                  f"({int(total) // 3600}h {int(total) % 3600 // 60}m) on {row_label}")
+            logged_count += 1
+            continue
+
         print(f"Logging {row_label}...")
         if log_row(issue_key, description, entries):
             df.at[index, 'Logged'] = 'TRUE'
@@ -183,12 +210,14 @@ def main():
             print(f"  Row not marked as logged; fix the issue and rerun.")
             error_count += 1
 
-    try:
-        df.to_csv(CSV_FILE_PATH, index=False)
-    except Exception as e:
-        sys.exit(f"Failed to save CSV file: {e}")
+    if not args.dry_run:
+        try:
+            df.to_csv(CSV_FILE_PATH, index=False)
+        except Exception as e:
+            sys.exit(f"Failed to save CSV file: {e}")
 
-    print(f"\nDone. {logged_count} row(s) logged, {skipped_count} skipped (non-Jira), "
+    action = 'validated' if args.dry_run else 'logged'
+    print(f"\nDone. {logged_count} row(s) {action}, {skipped_count} skipped (non-Jira), "
           f"{error_count} error(s).")
 
 
